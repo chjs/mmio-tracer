@@ -19,7 +19,7 @@
 # Tests defined here should not be defined in TOOL_ROOTS and TEST_ROOTS.
 TEST_TOOL_ROOTS := inscount0 inscount1 inscount2 proccount imageload staticcount detach malloctrace \
                    malloc_mt inscount_tls stack-debugger pinatrace itrace isampling safecopy invocation countreps \
-                   nonstatica
+                   nonstatica mmio_tracer
 
 # This defines the tests to be run that were not already defined in TEST_TOOL_ROOTS.
 TEST_ROOTS :=

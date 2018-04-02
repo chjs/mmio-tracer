@@ -54,6 +54,7 @@ KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool",
 // lock serializes access to the output file.
 FILE * out;
 PIN_LOCK pinLock;
+PIN_RWMUTEX RWMutex;
 
 typedef enum callType {
 	SYSTEMCALL = 100,
@@ -83,8 +84,9 @@ typedef struct threadNode {
 	struct threadNode *next;
 } ThreadNode;
 
-ThreadNode *threadNodeHead = NULL;
-ThreadNode *threadNodeTail = NULL;
+//ThreadNode *threadNodeHead = NULL;
+//ThreadNode *threadNodeTail = NULL;
+ThreadNode threadArray[100];
 
 typedef struct memNode {
 	char filename[128];
@@ -128,6 +130,13 @@ typedef struct memcpyArgs {
 	size_t length;
 } MemcpyArgs;
 
+typedef struct memsetArgs {
+	char filename[128];
+	unsigned long addr;
+	int c;
+	size_t length;
+} MemsetArgs;
+
 char *findMemNode(unsigned long addr, unsigned long *pgoff, THREADID tid) {
 	MemNode *curr = NULL;
 
@@ -167,6 +176,7 @@ int insertMemNode(char *filename, unsigned long start, unsigned long end, unsign
 	return TRUE;
 }
 
+#if 0
 int insertThreadNode(THREADID tid) {
 	ThreadNode *newNode = (ThreadNode *)malloc(sizeof(ThreadNode));
 
@@ -191,6 +201,7 @@ int insertThreadNode(THREADID tid) {
 	//fflush(out);
 	return TRUE;
 }
+#endif
 
 int deleteMemNode(unsigned long start, unsigned long length, THREADID tid) {
 	MemNode *prev = NULL;
@@ -218,6 +229,7 @@ int deleteMemNode(unsigned long start, unsigned long length, THREADID tid) {
 	return FALSE;
 }
 
+#if 0
 int deleteThreadNode(THREADID tid) {
 	ThreadNode *prev = NULL;
 	ThreadNode *curr = NULL;
@@ -243,7 +255,9 @@ int deleteThreadNode(THREADID tid) {
 	fflush(out);
 	return FALSE;
 }
+#endif
 
+#if 0
 int putSyscallArgs(THREADID tid, void *args, SyscallType type) {
 	ThreadNode *curr = threadNodeHead;
 
@@ -339,6 +353,7 @@ void *getLibcallArgs(THREADID tid, LibcallType *type) {
 	fflush(out);
 	return NULL;
 }
+#endif
 
 // This routine is executed every time a thread is created.
 VOID ThreadStart(THREADID tid, CONTEXT *ctxt, INT32 flags, VOID *v) {
@@ -346,7 +361,19 @@ VOID ThreadStart(THREADID tid, CONTEXT *ctxt, INT32 flags, VOID *v) {
 	fprintf(out, "%d, thread-begin\n",tid);
 	fflush(out);
 	PIN_ReleaseLock(&pinLock);
-	insertThreadNode(tid);
+
+	if (tid > 100) {
+		PIN_GetLock(&pinLock, tid+1);
+		fprintf(out, "%d, %s: There are too many threads. (ERROR)\n", tid, __func__);
+		fflush(out);
+		PIN_ReleaseLock(&pinLock);
+		exit(EXIT_FAILURE);
+	}
+	//insertThreadNode(tid);
+	threadArray[tid].sType = S_NONE;
+	threadArray[tid].syscallArgs = NULL;
+	threadArray[tid].lType = L_NONE;
+	threadArray[tid].libcallArgs = NULL;
 }
 
 // This routine is executed every time a thread is destroyed.
@@ -355,7 +382,7 @@ VOID ThreadFini(THREADID tid, const CONTEXT *ctxt, INT32 code, VOID *v) {
 	fprintf(out, "%d, thread-end\n",tid);
 	fflush(out);
 	PIN_ReleaseLock(&pinLock);
-	deleteThreadNode(tid);
+	//deleteThreadNode(tid);
 }
 
 // This routine is executed each time mmap() is called.
@@ -403,12 +430,6 @@ VOID BeforeMmap(THREADID tid,
 		exit(EXIT_FAILURE);
 	}
 
-	PIN_GetLock(&pinLock, tid+1);
-	fprintf(out, "%d, mmap-call, 0x%lx, %lu, 0x%x, 0x%x, %s, %ld\n",
-			tid, addr, length, prot, flags, filename, offset);
-	fflush(out);
-	PIN_ReleaseLock(&pinLock);
-
 	strcpy(args->filename, filename);
 	args->addr = addr;
 	args->length = length;
@@ -417,8 +438,18 @@ VOID BeforeMmap(THREADID tid,
 	args->fd = fd;
 	args->offset = offset;
 
+	/*
 	PIN_GetLock(&pinLock, tid+1);
 	putSyscallArgs(tid, (void *)args, S_MMAP);
+	PIN_ReleaseLock(&pinLock);
+	*/
+	threadArray[tid].syscallArgs = (void *)args;
+	threadArray[tid].sType = S_MMAP;
+
+	PIN_GetLock(&pinLock, tid+1);
+	fprintf(out, "%d, mmap-call, 0x%lx, %lu, 0x%x, 0x%x, %s, %ld\n",
+			tid, addr, length, prot, flags, filename, offset);
+	fflush(out);
 	PIN_ReleaseLock(&pinLock);
 }
 
@@ -430,9 +461,11 @@ VOID AfterMmap(THREADID tid, MmapArgs *args, unsigned long ret) {
 	end = start + args->length;
 	nrpages = args->length >> PAGE_SHIFT;
 
-	PIN_GetLock(&pinLock, tid+1);
+	//PIN_GetLock(&pinLock, tid+1);
+	PIN_RWMutexWriteLock(&RWMutex);
 	result = insertMemNode(args->filename, start, end, args->length, nrpages, tid);
-	PIN_ReleaseLock(&pinLock);
+	//PIN_ReleaseLock(&pinLock);
+	PIN_RWMutexUnlock(&RWMutex);
 
 	if (result) {
 		PIN_GetLock(&pinLock, tid+1);
@@ -457,9 +490,11 @@ VOID BeforeMunmap(THREADID tid, unsigned long addr, size_t length) {
 	char *filename;
 	unsigned long pgoff;
 
-	PIN_GetLock(&pinLock, tid+1);
+	//PIN_GetLock(&pinLock, tid+1);
+	PIN_RWMutexReadLock(&RWMutex);
 	filename = findMemNode(addr, &pgoff, tid);
-	PIN_ReleaseLock(&pinLock);
+	//PIN_ReleaseLock(&pinLock);
+	PIN_RWMutexUnlock(&RWMutex);
 
 	if (filename == NULL)
 		return;
@@ -477,8 +512,11 @@ VOID BeforeMunmap(THREADID tid, unsigned long addr, size_t length) {
 	args->addr = addr;
 	args->length = length;
 
+	threadArray[tid].syscallArgs = (void *)args;
+	threadArray[tid].sType = S_MUNMAP;
+
 	PIN_GetLock(&pinLock, tid+1);
-	putSyscallArgs(tid, (void *)args, S_MUNMAP);
+	//putSyscallArgs(tid, (void *)args, S_MUNMAP);
 	fprintf(out, "%d, munmap-call, 0x%lx, %lu\n", tid, addr, length);
 	fflush(out);
 	PIN_ReleaseLock(&pinLock);
@@ -487,9 +525,11 @@ VOID BeforeMunmap(THREADID tid, unsigned long addr, size_t length) {
 VOID AfterMunmap(THREADID tid, MunmapArgs *args, int ret) {
 	int result;
 
-	PIN_GetLock(&pinLock, tid+1);
+	//PIN_GetLock(&pinLock, tid+1);
+	PIN_RWMutexWriteLock(&RWMutex);
 	result = deleteMemNode(args->addr, args->length, tid);
-	PIN_ReleaseLock(&pinLock);
+	//PIN_ReleaseLock(&pinLock);
+	PIN_RWMutexUnlock(&RWMutex);
 
 	if (result) {
 		PIN_GetLock(&pinLock, tid+1);
@@ -513,9 +553,11 @@ VOID BeforeMsync(THREADID tid, unsigned long addr, size_t length, int flags) {
 	char *filename;
 	unsigned long pgoff;
 
-	PIN_GetLock(&pinLock, tid+1);
+	//PIN_GetLock(&pinLock, tid+1);
+	PIN_RWMutexReadLock(&RWMutex);
 	filename = findMemNode(addr, &pgoff, tid);
-	PIN_ReleaseLock(&pinLock);
+	//PIN_ReleaseLock(&pinLock);
+	PIN_RWMutexUnlock(&RWMutex);
 
 	if (filename == NULL)
 		return;
@@ -534,11 +576,14 @@ VOID BeforeMsync(THREADID tid, unsigned long addr, size_t length, int flags) {
 	args->length = length;
 	args->flags = flags;
 
+	threadArray[tid].syscallArgs = (void *)args;
+	threadArray[tid].sType = S_MSYNC;;
+
 	PIN_GetLock(&pinLock, tid+1);
 	fprintf(out, "%d, msync-call, 0x%lx, %lu, %s\n",
 			tid, addr, length, filename);
 	fflush(out);
-	putSyscallArgs(tid, (void *)args, S_MSYNC);
+	//putSyscallArgs(tid, (void *)args, S_MSYNC);
 	PIN_ReleaseLock(&pinLock);
 }
 
@@ -579,9 +624,16 @@ VOID SyscallExit(THREADID tid, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID *v)
 	void *args;
 	SyscallType type;
 
+	/*
 	PIN_GetLock(&pinLock, tid+1);
 	args = getSyscallArgs(tid, &type);
 	PIN_ReleaseLock(&pinLock);
+	*/
+	args = (void *)(threadArray[tid].syscallArgs);
+	type = threadArray[tid].sType;
+
+	threadArray[tid].syscallArgs = NULL;
+	threadArray[tid].sType = S_NONE;
 
 	if (args == NULL)
 		return;
@@ -615,9 +667,11 @@ VOID BeforeMemcpy(ADDRINT arg0, ADDRINT arg1, ADDRINT arg2, THREADID tid)
 	unsigned long src = (unsigned long)arg1;
 	size_t length = (size_t)arg2;
 
-	PIN_GetLock(&pinLock, tid+1);
+	//PIN_GetLock(&pinLock, tid+1);
+	PIN_RWMutexReadLock(&RWMutex);
 	filename = findMemNode(dst, &pgoff, tid);
-	PIN_ReleaseLock(&pinLock);
+	//PIN_ReleaseLock(&pinLock);
+	PIN_RWMutexUnlock(&RWMutex);
 
 	if (filename == NULL)
 		return;
@@ -636,8 +690,11 @@ VOID BeforeMemcpy(ADDRINT arg0, ADDRINT arg1, ADDRINT arg2, THREADID tid)
 	args->src = src;
 	args->length = length;
 
+	threadArray[tid].libcallArgs = (void *)args;
+	threadArray[tid].lType = L_MEMCPY;
+
 	PIN_GetLock(&pinLock, tid+1);
-	putLibcallArgs(tid, (void *)args, L_MEMCPY);
+	//putLibcallArgs(tid, (void *)args, L_MEMCPY);
 	fprintf(out, "%d, memcpy-call, 0x%lx, 0x%lx, %lu, %s\n", tid, dst, src, length, filename);
 	fflush(out);
 	PIN_ReleaseLock(&pinLock);
@@ -647,9 +704,15 @@ VOID AfterMemcpy(ADDRINT ret, THREADID tid) {
 	MemcpyArgs *args;
 	LibcallType type;
 
+	/*
 	PIN_GetLock(&pinLock, tid+1);
 	args = (MemcpyArgs *)getLibcallArgs(tid, &type);
 	PIN_ReleaseLock(&pinLock);
+	*/
+	args = (MemcpyArgs *)(threadArray[tid].libcallArgs);
+	type = threadArray[tid].lType;
+	threadArray[tid].libcallArgs = NULL;
+	threadArray[tid].lType = L_NONE;
 
 	if (args == NULL)
 		return;
@@ -657,6 +720,81 @@ VOID AfterMemcpy(ADDRINT ret, THREADID tid) {
 	if (type == L_MEMCPY) {
 		PIN_GetLock(&pinLock, tid+1);
 		fprintf(out, "%d, memcpy-return, 0x%lx\n", tid, (unsigned long)ret);
+		fflush(out);
+		PIN_ReleaseLock(&pinLock);
+	}
+	else {
+		PIN_GetLock(&pinLock, tid+1);
+		fprintf(out, "%d, %s: LibcallType is wrong.\n", tid, __func__);
+		fflush(out);
+		PIN_ReleaseLock(&pinLock);
+		exit(EXIT_FAILURE);
+	}
+}
+
+VOID BeforeMemset(ADDRINT arg0, ADDRINT arg1, ADDRINT arg2, THREADID tid)
+{
+	MemsetArgs *args;
+	unsigned long pgoff;
+	char *filename;
+
+	unsigned long addr = (unsigned long)arg0;
+	int c = (int)arg1;
+	size_t length = (size_t)arg2;
+
+	//PIN_GetLock(&pinLock, tid+1);
+	PIN_RWMutexReadLock(&RWMutex);
+	filename = findMemNode(addr, &pgoff, tid);
+	//PIN_ReleaseLock(&pinLock);
+	PIN_RWMutexUnlock(&RWMutex);
+
+	if (filename == NULL)
+		return;
+
+	args = (MemsetArgs *)malloc(sizeof(MemsetArgs));
+	if (args == NULL) {
+		PIN_GetLock(&pinLock, tid+1);
+		fprintf(out, "%d, %s: malloc() failed (ERROR)\n", tid, __func__);
+		fflush(out);
+		PIN_ReleaseLock(&pinLock);
+		exit(EXIT_FAILURE);
+	}
+
+	strcpy(args->filename, filename);
+	args->addr = addr;
+	args->c = c;
+	args->length = length;
+
+	threadArray[tid].libcallArgs = (void *)args;
+	threadArray[tid].lType = L_MEMSET;
+
+	PIN_GetLock(&pinLock, tid+1);
+	//putLibcallArgs(tid, (void *)args, L_MEMSET);
+	fprintf(out, "%d, memset-call, 0x%lx, %d, %lu, %s\n", tid, addr, c, length, filename);
+	fflush(out);
+	PIN_ReleaseLock(&pinLock);
+}
+
+VOID AfterMemset(ADDRINT ret, THREADID tid) {
+	MemsetArgs *args;
+	LibcallType type;
+
+	/*
+	PIN_GetLock(&pinLock, tid+1);
+	args = (MemsetArgs *)getLibcallArgs(tid, &type);
+	PIN_ReleaseLock(&pinLock);
+	*/
+	args = (MemsetArgs *)(threadArray[tid].libcallArgs);
+	type = threadArray[tid].lType;
+	threadArray[tid].libcallArgs = NULL;
+	threadArray[tid].lType = L_NONE;
+
+	if (args == NULL)
+		return;
+
+	if (type == L_MEMSET) {
+		PIN_GetLock(&pinLock, tid+1);
+		fprintf(out, "%d, memset-return, 0x%lx\n", tid, (unsigned long)ret);
 		fflush(out);
 		PIN_ReleaseLock(&pinLock);
 	}
@@ -677,9 +815,11 @@ VOID RecordMemRead(VOID * ip, VOID * addr, THREADID tid)
 	unsigned long ip_addr = (unsigned long)ip;
 	unsigned long mem_addr = (unsigned long)addr;
 
-	PIN_GetLock(&pinLock, tid+1);
+	//PIN_GetLock(&pinLock, tid+1);
+	PIN_RWMutexReadLock(&RWMutex);
 	filename = findMemNode(mem_addr, &pgoff, tid);
-	PIN_ReleaseLock(&pinLock);
+	//PIN_ReleaseLock(&pinLock);
+	PIN_RWMutexUnlock(&RWMutex);
 
 	if (filename == NULL)
 		return;
@@ -698,9 +838,11 @@ VOID RecordMemWrite(VOID * ip, VOID * addr, THREADID tid)
 	unsigned long ip_addr = (unsigned long)ip;
 	unsigned long mem_addr = (unsigned long)addr;
 
-	PIN_GetLock(&pinLock, tid+1);
+	//PIN_GetLock(&pinLock, tid+1);
+	PIN_RWMutexReadLock(&RWMutex);
 	filename = findMemNode(mem_addr, &pgoff, tid);
-	PIN_ReleaseLock(&pinLock);
+	//PIN_ReleaseLock(&pinLock);
+	PIN_RWMutexUnlock(&RWMutex);
 
 	if (filename == NULL)
 		return;
@@ -752,6 +894,7 @@ VOID Routine( IMG img, RTN rtn, void * v)
 	// will be either memcpy, memmove.
 	bool isMemmove = strcmp(RTN_Name(rtn).c_str(),"memmove")==0 ;
 	bool isMemcpy = strcmp(RTN_Name(rtn).c_str(),"memcpy")==0 ;
+	bool isMemset = strcmp(RTN_Name(rtn).c_str(),"memset")==0 ;
 
 	if (isMemmove || isMemcpy)
 	{
@@ -786,6 +929,25 @@ VOID Routine( IMG img, RTN rtn, void * v)
 
 			RTN_Close(rtn);
 		}
+	}
+	if (isMemset)
+	{
+		RTN_Open(rtn);
+
+		// Instrument memcpy() to print the input argument value and the return value.
+		RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)BeforeMemset,
+				IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+				IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+				IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+				IARG_THREAD_ID,
+				IARG_END);
+
+		RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)AfterMemset,
+				IARG_FUNCRET_EXITPOINT_VALUE,
+				IARG_THREAD_ID,
+				IARG_END);
+
+		RTN_Close(rtn);
 	}
 }
 
@@ -840,6 +1002,7 @@ VOID Instruction(INS ins, VOID *v)
 // This routine is executed once at the end.
 VOID Fini(INT32 code, VOID *v) {
 	fclose(out);
+	PIN_RWMutexFini(&RWMutex);
 }
 
 /* ===================================================================== */
@@ -859,6 +1022,7 @@ INT32 Usage() {
 int main(INT32 argc, CHAR **argv) {
 	// Initialize the pin lock
 	PIN_InitLock(&pinLock);
+	PIN_RWMutexInit(&RWMutex);
 
 	// Initialize pin
 	if (PIN_Init(argc, argv))
